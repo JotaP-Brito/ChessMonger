@@ -1,4 +1,4 @@
-// ChessMonger – with robust move execution
+// ChessMonger – coordinate‑based piece finding
 
 const pieceMap = {
   'br':'r','bn':'n','bb':'b','bq':'q','bk':'k','bp':'p',
@@ -20,7 +20,6 @@ let gameEndDetected = false;
 let isPlayingMove = false;
 let lastObservedBoardElement = null;
 
-// ---- Helper functions ----
 function isFlipped() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   return board ? board.classList.contains('flipped') : false;
@@ -124,7 +123,10 @@ function getFEN() {
   return fen;
 }
 
-// ---- Square center (used by drag) ----
+function isBoardReady() {
+  return document.querySelectorAll('.piece').length >= 20;
+}
+
 function getSquareCenter(square) {
   const file = square.charCodeAt(0)-97;
   const rank = 8-parseInt(square[1]);
@@ -144,35 +146,18 @@ function getSquareCenter(square) {
   return {x,y};
 }
 
-// ---- Robust drag using direct piece element lookup ----
-function findPieceOnSquare(square) {
-  // square like 'e2'
-  const targetSquareClass = `square-${square.charCodeAt(0)-96}${square[1]}`; // square-55 for e2? Wait, chess.com uses square-XY where X=file, Y=rank. e2 = file 5, rank 2 => square-52.
-  const file = square.charCodeAt(0) - 96; // a=1, b=2, ..., h=8
-  const rank = parseInt(square[1]);
-  const className = `square-${file}${rank}`;
-  const squareEl = document.querySelector(`.${className}`);
-  if (squareEl) {
-    return squareEl.querySelector('.piece');
-  }
-  return null;
-}
-
 async function robustDragMove(from, to) {
-  // Method 1: Use direct piece lookup
-  const piece = findPieceOnSquare(from);
-  if (!piece) {
-    console.warn(`ChessMonger: no piece found on ${from}`);
-    return false;
-  }
   const fp = getSquareCenter(from);
   const tp = getSquareCenter(to);
-  if (!fp || !tp) {
-    console.warn('ChessMonger: could not get square centers');
+  if (!fp || !tp) return false;
+
+  // Use coordinate to find the piece
+  const piece = document.elementFromPoint(fp.x, fp.y);
+  if (!piece || !piece.classList.contains('piece')) {
+    console.warn(`ChessMonger: no piece at ${from}`);
     return false;
   }
 
-  // Simulate a simple drag
   console.log(`ChessMonger: dragging from ${from} to ${to}`);
   piece.dispatchEvent(new PointerEvent('pointerdown', {
     bubbles: true, cancelable: true, view: window,
@@ -180,14 +165,14 @@ async function robustDragMove(from, to) {
   }));
   await new Promise(r=>setTimeout(r, 60));
 
-  const targetSquareEl = findPieceOnSquare(to) || document.querySelector(`.square-${to.charCodeAt(0)-96}${to[1]}`) || document.body;
-  targetSquareEl.dispatchEvent(new PointerEvent('pointermove', {
+  const target = document.elementFromPoint(tp.x, tp.y) || document.body;
+  target.dispatchEvent(new PointerEvent('pointermove', {
     bubbles: true, cancelable: true, view: window,
     clientX: tp.x, clientY: tp.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
   await new Promise(r=>setTimeout(r, 40));
 
-  targetSquareEl.dispatchEvent(new PointerEvent('pointerup', {
+  target.dispatchEvent(new PointerEvent('pointerup', {
     bubbles: true, cancelable: true, view: window,
     clientX: tp.x, clientY: tp.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
@@ -200,43 +185,56 @@ async function playMove(uci) {
   console.log(`ChessMonger: playing ${from}→${to}`);
   isPlayingMove = true;
 
-  // Try robust drag
+  // 1. Try drag
   let success = await robustDragMove(from, to);
   if (success) {
     await new Promise(r=>setTimeout(r, 400));
-    // Verify FEN changed
     const newFEN = getFEN();
-    if (newFEN === lastFEN) {
-      console.warn('ChessMonger: drag did not register, trying fallback click...');
-      // Fallback: try text input or board API
-      const boardEl = document.querySelector('chess-board');
-      if (boardEl) {
-        const chess = boardEl.game || boardEl.chess || window.chess;
-        if (chess && typeof chess.move === 'function') {
-          try {
-            chess.move({from, to, promotion:'q'});
-            console.log('ChessMonger: move via board API');
-          } catch(e) {
-            console.error('ChessMonger: board API failed', e);
-          }
-        }
+    if (newFEN !== lastFEN) {
+      console.log('ChessMonger: move registered');
+      isPlayingMove = false;
+      return;
+    }
+    console.warn('ChessMonger: drag did not register');
+  }
+
+  // 2. Fallback: board API
+  const boardEl = document.querySelector('chess-board');
+  if (boardEl) {
+    const chess = boardEl.game || boardEl.chess || window.chess;
+    if (chess && typeof chess.move === 'function') {
+      try {
+        chess.move({from, to, promotion:'q'});
+        console.log('ChessMonger: move via board API');
+        isPlayingMove = false;
+        return;
+      } catch(e) {
+        console.error('ChessMonger: board API failed', e);
       }
     }
-  } else {
-    console.warn('ChessMonger: drag failed completely');
+  }
+
+  // 3. Fallback: simple click-based move (click from square then to square)
+  const fp = getSquareCenter(from);
+  const tp = getSquareCenter(to);
+  if (fp && tp) {
+    const fromEl = document.elementFromPoint(fp.x, fp.y) || document.body;
+    fromEl.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:fp.x, clientY:fp.y, button:0}));
+    const toEl = document.elementFromPoint(tp.x, tp.y) || document.body;
+    toEl.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, clientX:tp.x, clientY:tp.y, button:0}));
+    console.log('ChessMonger: attempted click move');
   }
 
   isPlayingMove = false;
 }
 
-// ---- Auto‑play scheduling ----
 function scheduleAutoPlay(moveUci, thinkTime) {
   cancelAutoPlay();
   selectedMove = moveUci;
   thinkingStart = Date.now();
   console.log(`ChessMonger: scheduling ${moveUci} in ${thinkTime}ms`);
   autoPlayTimeout = setTimeout(() => {
-    if (selectedMove === moveUci && isUserTurn()) {
+    if (selectedMove === moveUci && isUserTurn() && isBoardReady()) {
       playMove(moveUci);
       selectedMove = null;
       thinkingStart = null;
@@ -259,7 +257,6 @@ function computeThinkTime(fen) {
   return Math.round(base*1000);
 }
 
-// ---- Game‑end detection & auto‑queue ----
 function checkGameEnd() {
   if (!lastFEN) return false;
   const selectors = [
@@ -344,7 +341,6 @@ function startGameEndObserver() {
   console.log('ChessMonger: game end observer started');
 }
 
-// ---- Board change observer ----
 function setupBoardObserver() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   const target = board || document.body;
@@ -361,13 +357,13 @@ function setupBoardObserver() {
   console.log(`ChessMonger: board observer attached to ${target.tagName}`);
 }
 
-// ---- Update loop ----
 function scheduleUpdate(delay=400) {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(doUpdate, delay);
 }
 
 async function doUpdate() {
+  if (!isBoardReady()) return;
   if (isPlayingMove || requestInFlight) return;
   if (autoPlayTimeout && selectedMove && lastFEN && getFEN()===lastFEN) return;
 
@@ -399,8 +395,8 @@ async function doUpdate() {
   });
 }
 
-// ---- Polling fallback ----
 function pollForOpponentMove() {
+  if (!isBoardReady()) return;
   if (isPlayingMove || requestInFlight) return;
   const fen = getFEN();
   if (fen !== lastFEN) {
@@ -409,7 +405,6 @@ function pollForOpponentMove() {
   }
 }
 
-// ---- Init ----
 userColor = null;
 gameEndDetected = false;
 
