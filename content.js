@@ -1,7 +1,8 @@
-// ChessMonger – robust API search + click fallback
+// ChessMonger – full-featured with robust FEN tracking
 
 const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
+// ---- Global state ----
 let autoPlayEnabled = true;
 let autoQueueEnabled = true;
 let autoPlayTimeout = null;
@@ -14,38 +15,34 @@ let debounceTimer = null;
 let lastMoveCount = 0;
 let gameEndDetected = false;
 let isPlayingMove = false;
+let observer = null;
 
-// ---- Find chess API (extended search) ----
+// ---- Internal board state ----
+let boardState = {
+  placement: START_FEN.split(' ')[0],
+  active: 'w',
+  castling: 'KQkq',
+  enPassant: '-',
+  halfMove: 0,
+  fullMove: 1
+};
+
+// ---- Find chess API ----
 function findChessAPI() {
-  // 1) board element
   const boardEl = document.querySelector('chess-board');
   if (boardEl) {
     if (boardEl.game && typeof boardEl.game.move === 'function') return boardEl.game;
     if (boardEl.chess && typeof boardEl.chess.move === 'function') return boardEl.chess;
-    // walk own keys
     for (const key of Object.keys(boardEl)) {
       const val = boardEl[key];
       if (val && typeof val.move === 'function') return val;
     }
-    // Vue 2/3 internal
-    if (boardEl.__vue__ && boardEl.__vue__.game && typeof boardEl.__vue__.game.move === 'function') return boardEl.__vue__.game;
-    // React fiber
-    const fiberKey = Object.keys(boardEl).find(k => k.startsWith('__reactFiber'));
-    if (fiberKey && boardEl[fiberKey]?.stateNode?.game?.move) return boardEl[fiberKey].stateNode.game;
   }
-  // 2) window
   if (window.chess && typeof window.chess.move === 'function') return window.chess;
-  // 3) walk all window keys (shallow)
-  for (const key of Object.getOwnPropertyNames(window)) {
-    try {
-      const val = window[key];
-      if (val && typeof val.move === 'function' && typeof val.fen === 'function') return val;
-    } catch(e) {}
-  }
   return null;
 }
 
-// ---- Colour & turn ----
+// ---- User colour ----
 function detectUserColor() {
   const api = findChessAPI();
   if (api?.myColor) {
@@ -67,36 +64,181 @@ function ensureUserColor() {
 }
 
 function isUserTurn() {
-  const api = findChessAPI();
-  if (api?.turn) {
-    const t = api.turn();
-    return t === ensureUserColor() || t === (ensureUserColor()==='w'?'white':'black');
-  }
-  const items = document.querySelectorAll('[class*="move-list"] [class*="move"]:not([class*="move-number"])');
-  const half = Math.floor(items.length / 2);
-  return (half % 2 === 0 ? 'w' : 'b') === ensureUserColor();
+  return boardState.active === ensureUserColor();
 }
 
+// ---- Move count ----
 function getMoveCount() {
   const items = document.querySelectorAll('[class*="move-list"] [class*="move"]:not([class*="move-number"])');
   return items.length;
 }
 
-function getCurrentFEN() {
-  const api = findChessAPI();
-  if (api?.fen) {
-    try {
-      const f = api.fen();
-      if (f && f.includes(' ')) return f;
-    } catch(e) {}
+// ---- SAN parser ----
+function parseSAN(san, fen) {
+  if (!san || san === '...') return null;
+  san = san.replace(/[+#!?]/g, '');
+  if (san === 'O-O' || san === '0-0') return fen.split(' ')[1] === 'w' ? 'e1g1' : 'e8g8';
+  if (san === 'O-O-O' || san === '0-0-0') return fen.split(' ')[1] === 'w' ? 'e1c1' : 'e8c8';
+
+  let pieceType = 'P';
+  let destStr = '';
+  if (san.length >= 2) {
+    const last2 = san.substring(san.length-2);
+    if (/[a-h][1-8]/.test(last2)) destStr = last2;
   }
-  // fallback: minimal FEN based on move count (engine only needs active colour + piece placement)
-  const moveCount = getMoveCount();
-  const active = (Math.floor(moveCount/2) % 2 === 0) ? 'w' : 'b';
-  return `${START_FEN.split(' ')[0]} ${active} - - ${Math.floor(moveCount/2)} ${Math.floor(moveCount/2)+1}`;
+  if (!destStr) return null;
+
+  const dest = destStr;
+  const destCol = dest.charCodeAt(0)-97;
+  const destRow = 8-parseInt(dest[1]);
+
+  if ('KQRBN'.includes(san[0]) || 'kqrbn'.includes(san[0])) {
+    pieceType = san[0].toUpperCase();
+  }
+
+  const active = fen.split(' ')[1];
+  const pieceChar = active === 'w' ? pieceType : pieceType.toLowerCase();
+
+  let disambig = '';
+  if (pieceType !== 'P' && san.length > 2) {
+    let temp = san.substring(1, san.length-2);
+    temp = temp.replace('x','');
+    disambig = temp;
+  } else if (pieceType === 'P' && san.includes('x')) {
+    disambig = san[0];
+  }
+
+  let fromFile = null, fromRank = null;
+  if (disambig.length === 1) {
+    if ('abcdefgh'.includes(disambig)) fromFile = disambig.charCodeAt(0)-97;
+    else fromRank = 8-parseInt(disambig);
+  } else if (disambig.length === 2) {
+    fromFile = disambig.charCodeAt(0)-97;
+    fromRank = 8-parseInt(disambig[1]);
+  }
+
+  const rows = fen.split(' ')[0].split('/');
+  const board = rows.map(row => {
+    const arr = [];
+    for (const ch of row) {
+      if (ch >= '1' && ch <= '8') { for (let i=0; i<parseInt(ch); i++) arr.push(null); }
+      else arr.push(ch);
+    }
+    return arr;
+  });
+
+  for (let r=0; r<8; r++) {
+    for (let c=0; c<8; c++) {
+      if (board[r][c] === pieceChar) {
+        if (fromFile !== null && c !== fromFile) continue;
+        if (fromRank !== null && r !== fromRank) continue;
+        return String.fromCharCode(97+c) + (8-r) + dest;
+      }
+    }
+  }
+  return null;
 }
 
-// ---- Square coordinates ----
+// ---- Apply UCI move to board state ----
+function applyMove(uci) {
+  const from = uci.substring(0,2);
+  const to = uci.substring(2,4);
+  const promotion = uci.length > 4 ? uci[4] : null;
+
+  let { placement, active, castling, enPassant } = boardState;
+  const rows = placement.split('/');
+  const board = rows.map(row => {
+    const arr = [];
+    for (const ch of row) {
+      if (ch >= '1' && ch <= '8') { for (let i=0; i<parseInt(ch); i++) arr.push(null); }
+      else arr.push(ch);
+    }
+    return arr;
+  });
+
+  const fromCol = from.charCodeAt(0)-97;
+  const fromRow = 8-parseInt(from[1]);
+  const toCol = to.charCodeAt(0)-97;
+  const toRow = 8-parseInt(to[1]);
+
+  const piece = board[fromRow][fromCol];
+  const captured = board[toRow][toCol];
+
+  board[fromRow][fromCol] = null;
+  board[toRow][toCol] = promotion ? (active==='w'?promotion.toUpperCase():promotion) : piece;
+
+  if (piece === 'K') {
+    castling = castling.replace('K','').replace('Q','');
+    if (from === 'e1' && to === 'g1') { board[7][5] = 'R'; board[7][7] = null; }
+    if (from === 'e1' && to === 'c1') { board[7][3] = 'R'; board[7][0] = null; }
+  }
+  if (piece === 'k') {
+    castling = castling.replace('k','').replace('q','');
+    if (from === 'e8' && to === 'g8') { board[0][5] = 'r'; board[0][7] = null; }
+    if (from === 'e8' && to === 'c8') { board[0][3] = 'r'; board[0][0] = null; }
+  }
+  if (piece === 'R' && from === 'a1') castling = castling.replace('Q','');
+  if (piece === 'R' && from === 'h1') castling = castling.replace('K','');
+  if (piece === 'r' && from === 'a8') castling = castling.replace('q','');
+  if (piece === 'r' && from === 'h8') castling = castling.replace('k','');
+
+  if (piece === 'P' && fromCol !== toCol && !captured) board[fromRow][toCol] = null;
+  if (piece === 'p' && fromCol !== toCol && !captured) board[fromRow][toCol] = null;
+
+  let newEnPassant = '-';
+  if (piece === 'P' && Math.abs(fromRow-toRow) === 2) {
+    newEnPassant = String.fromCharCode(97+fromCol) + (8-(fromRow+toRow)/2);
+  }
+  if (piece === 'p' && Math.abs(fromRow-toRow) === 2) {
+    newEnPassant = String.fromCharCode(97+fromCol) + (8-(fromRow+toRow)/2);
+  }
+
+  const newPlacement = board.map(row => {
+    let str = '';
+    let empty = 0;
+    for (const cell of row) {
+      if (cell === null) empty++;
+      else { if (empty>0) { str+=empty; empty=0; } str+=cell; }
+    }
+    if (empty>0) str+=empty;
+    return str;
+  }).join('/');
+
+  boardState.placement = newPlacement;
+  boardState.active = active === 'w' ? 'b' : 'w';
+  boardState.castling = castling || '-';
+  boardState.enPassant = newEnPassant;
+  if (active === 'b') boardState.fullMove++;
+}
+
+// ---- Sync from move list ----
+function syncFromMoveList() {
+  boardState = {
+    placement: START_FEN.split(' ')[0],
+    active: 'w',
+    castling: 'KQkq',
+    enPassant: '-',
+    halfMove: 0,
+    fullMove: 1
+  };
+  let fen = START_FEN;
+  const items = document.querySelectorAll('[class*="move-list"] [class*="move"]:not([class*="move-number"])');
+  for (const item of items) {
+    const san = item.textContent?.trim();
+    if (!san) continue;
+    const uci = parseSAN(san, fen);
+    if (uci) {
+      applyMove(uci);
+      fen = boardState.placement + ' ' + boardState.active + ' ' + boardState.castling + ' ' + boardState.enPassant + ' 0 ' + boardState.fullMove;
+    }
+  }
+}
+
+function getCurrentFEN() {
+  return boardState.placement + ' ' + boardState.active + ' ' + boardState.castling + ' ' + boardState.enPassant + ' 0 ' + boardState.fullMove;
+}
+
+// ---- Move execution ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0)-97;
   const rank = 8-parseInt(square[1]);
@@ -104,8 +246,8 @@ function getSquareCenter(square) {
   if (!boardEl) return null;
   const rect = boardEl.getBoundingClientRect();
   const sq = rect.width/8;
-  const flipped = document.querySelector('chess-board')?.classList.contains('flipped') || false;
-  let x, y;
+  const flipped = boardEl.classList.contains('flipped');
+  let x,y;
   if (flipped) {
     x = rect.left + (7-file)*sq + sq/2;
     y = rect.top + (7-rank)*sq + sq/2;
@@ -113,50 +255,45 @@ function getSquareCenter(square) {
     x = rect.left + file*sq + sq/2;
     y = rect.top + rank*sq + sq/2;
   }
-  return {x, y};
+  return {x,y};
 }
 
-// ---- Play move (API first, then click fallback) ----
 async function playMove(uci) {
   console.log(`ChessMonger: playing ${uci}`);
   isPlayingMove = true;
 
-  // 1) Board API
+  // Update internal state immediately
+  applyMove(uci);
+
+  // Try API first
   const api = findChessAPI();
   if (api?.move) {
     try {
       api.move({from: uci.substring(0,2), to: uci.substring(2,4), promotion:'q'});
       console.log('move via API');
-      isPlayingMove = false;
-      return;
-    } catch(e) {
-      console.warn('API move failed, trying click', e);
-    }
+    } catch(e) { /* fall through */ }
   }
 
-  // 2) Click simulation (works on canvas)
-  const fromSq = uci.substring(0,2);
-  const toSq = uci.substring(2,4);
-  const fp = getSquareCenter(fromSq);
-  const tp = getSquareCenter(toSq);
+  // Click fallback
+  const fp = getSquareCenter(uci.substring(0,2));
+  const tp = getSquareCenter(uci.substring(2,4));
   if (fp && tp) {
-    // Click the source square
     const fromEl = document.elementFromPoint(fp.x, fp.y) || document.body;
     fromEl.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:fp.x, clientY:fp.y, button:0}));
-    await new Promise(r => setTimeout(r, 40));
-    // Click the target square
+    await new Promise(r=>setTimeout(r,40));
     const toEl = document.elementFromPoint(tp.x, tp.y) || document.body;
     toEl.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, clientX:tp.x, clientY:tp.y, button:0}));
     console.log('move via click');
-  } else {
-    console.error('could not get square coordinates');
   }
 
-  await new Promise(r => setTimeout(r, 400));
+  await new Promise(r=>setTimeout(r,400));
+
+  // Update move count AFTER our move registers in the DOM
+  lastMoveCount = getMoveCount();
   isPlayingMove = false;
 }
 
-// ---- Schedule ----
+// ---- Auto‑play scheduling ----
 function scheduleAutoPlay(moveUci, thinkTime) {
   cancelAutoPlay();
   selectedMove = moveUci;
@@ -164,8 +301,7 @@ function scheduleAutoPlay(moveUci, thinkTime) {
   autoPlayTimeout = setTimeout(() => {
     if (selectedMove === moveUci && isUserTurn()) {
       playMove(moveUci);
-      selectedMove = null;
-      thinkingStart = null;
+      selectedMove = null; thinkingStart = null;
     }
   }, thinkTime);
 }
@@ -249,7 +385,8 @@ async function doUpdate() {
   const currentMoveCount = getMoveCount();
   if (currentMoveCount !== lastMoveCount) {
     lastMoveCount = currentMoveCount;
-    console.log('ChessMonger: board changed');
+    syncFromMoveList();
+    console.log('ChessMonger: board synced');
   }
 
   if (!isUserTurn()) return;
@@ -259,7 +396,7 @@ async function doUpdate() {
   requestTimer = setTimeout(()=>{ requestInFlight=false; }, 8000);
 
   const fen = getCurrentFEN();
-  console.log(`ChessMonger: request move (${fen.substring(0,30)}...)`);
+  console.log(`ChessMonger: request move (${fen.substring(0,40)}...)`);
 
   chrome.runtime.sendMessage({type:'getMove', fen, time:0.5, multipv:1}, (response) => {
     requestInFlight = false;
@@ -274,10 +411,10 @@ async function doUpdate() {
   });
 }
 
+// ---- Polling ----
 function pollForOpponentMove() {
   if (isPlayingMove || requestInFlight) return;
   if (getMoveCount() !== lastMoveCount) {
-    console.log('ChessMonger: poll detected opponent move');
     doUpdate();
   }
 }
@@ -285,7 +422,9 @@ function pollForOpponentMove() {
 // ---- Init ----
 userColor = null;
 gameEndDetected = false;
-lastMoveCount = 0;
+lastMoveCount = getMoveCount();
+syncFromMoveList();
+console.log('ChessMonger: initial FEN', getCurrentFEN());
 
 scheduleUpdate(1500);
 startGameEndObserver();
