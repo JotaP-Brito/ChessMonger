@@ -1,4 +1,4 @@
-// ChessMonger – stealthy auto‑player with logging
+// ChessMonger – stealthy auto‑player with reliable opponent detection
 
 const pieceMap = {
   'br':'r','bn':'n','bb':'b','bq':'q','bk':'k','bp':'p',
@@ -15,10 +15,12 @@ let userColor = null;
 let requestInFlight = false;
 let requestTimer = null;
 let debounceTimer = null;
-let observer = null;
+let boardObserver = null;       // renamed to avoid conflict with game‑end observer
 let gameEndDetected = false;
 let isPlayingMove = false;
+let lastObservedBoardElement = null;  // track which element is being observed
 
+// ---- Helper functions (unchanged) ----
 function isFlipped() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   return board ? board.classList.contains('flipped') : false;
@@ -122,6 +124,7 @@ function getFEN() {
   return fen;
 }
 
+// ---- Mouse movement and drag (unchanged) ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0)-97;
   const rank = 8-parseInt(square[1]);
@@ -161,16 +164,10 @@ async function humanMouseMove(fromX, fromY, toX, toY, duration=150) {
 async function tryDragMove(from, to) {
   const fp = getSquareCenter(from);
   const tp = getSquareCenter(to);
-  if (!fp||!tp) {
-    console.warn('ChessMonger: could not get square centers');
-    return false;
-  }
+  if (!fp||!tp) return false;
   await humanMouseMove(fp.x+Math.random()*20-10, fp.y+Math.random()*20-10, fp.x, fp.y, 200);
   const piece = document.elementFromPoint(fp.x, fp.y);
-  if (!piece) {
-    console.warn('ChessMonger: no piece at source');
-    return false;
-  }
+  if (!piece) return false;
   piece.dispatchEvent(new PointerEvent('pointerdown', {
     bubbles:true, cancelable:true, view:window,
     clientX:fp.x, clientY:fp.y, button:0, pointerId:1, pointerType:'mouse', isPrimary:true
@@ -195,6 +192,7 @@ async function playMove(uci) {
   isPlayingMove = false;
 }
 
+// ---- Auto‑play scheduling ----
 function scheduleAutoPlay(moveUci, thinkTime) {
   cancelAutoPlay();
   selectedMove = moveUci;
@@ -224,6 +222,7 @@ function computeThinkTime(fen) {
   return Math.round(base*1000);
 }
 
+// ---- Game‑end detection & auto‑queue ----
 function checkGameEnd() {
   if (!lastFEN) return false;
   const selectors = [
@@ -297,20 +296,6 @@ function resetGameEndDetection() {
   }
 }
 
-function ensureBoardObserver() {
-  const board = document.querySelector('chess-board') || document.querySelector('.board');
-  if (observer) observer.disconnect();
-  if (board) {
-    observer = new MutationObserver(() => scheduleUpdate(400));
-    observer.observe(board, { childList:true, subtree:true, attributes:true, attributeFilter:['class','style'] });
-    console.log('ChessMonger: board observer attached');
-  } else {
-    observer = new MutationObserver(() => scheduleUpdate(400));
-    observer.observe(document.body, { childList:true, subtree:true, attributes:false });
-    console.warn('ChessMonger: board not found, observing body');
-  }
-}
-
 function startGameEndObserver() {
   const obs = new MutationObserver(() => {
     resetGameEndDetection();
@@ -322,6 +307,35 @@ function startGameEndObserver() {
   console.log('ChessMonger: game end observer started');
 }
 
+// ---- Board change observer (stable, no unnecessary reconnections) ----
+function setupBoardObserver() {
+  const board = document.querySelector('chess-board') || document.querySelector('.board');
+  const target = board || document.body;
+
+  // If we're already observing the same element, do nothing
+  if (lastObservedBoardElement === target) return;
+
+  // Disconnect old observer if any
+  if (boardObserver) boardObserver.disconnect();
+
+  lastObservedBoardElement = target;
+
+  boardObserver = new MutationObserver(() => {
+    // Debounced update when the board changes
+    scheduleUpdate(400);
+  });
+
+  boardObserver.observe(target, {
+    childList: true,
+    subtree: true,
+    attributes: target !== document.body,       // only on board, not body
+    attributeFilter: target !== document.body ? ['class', 'style'] : undefined
+  });
+
+  console.log(`ChessMonger: board observer attached to ${target.tagName}`);
+}
+
+// ---- Update loop ----
 function scheduleUpdate(delay=400) {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(doUpdate, delay);
@@ -359,10 +373,27 @@ async function doUpdate() {
   });
 }
 
+// ---- Robust polling fallback – works even if observer misses an update ----
+function pollForOpponentMove() {
+  if (isPlayingMove || requestInFlight) return;
+  const fen = getFEN();
+  if (fen !== lastFEN) {
+    // Opponent moved – process immediately
+    console.log('ChessMonger: poll detected opponent move');
+    doUpdate();
+  }
+}
+
+// ---- Init ----
 userColor = null;
 gameEndDetected = false;
-scheduleUpdate(1500);
-ensureBoardObserver();
-startGameEndObserver();
-setInterval(ensureBoardObserver, 10000);
-setInterval(()=>scheduleUpdate(0), 3000);
+
+scheduleUpdate(1500);             // initial delay to let the page settle
+setupBoardObserver();             // start watching the board
+startGameEndObserver();           // watch for game‑end
+
+// Regular polling every 3 seconds (ignores lastFEN check)
+setInterval(pollForOpponentMove, 3000);
+
+// Re‑check board element every 30 seconds (in case it was replaced)
+setInterval(setupBoardObserver, 30000);
