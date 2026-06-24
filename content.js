@@ -1,4 +1,4 @@
-// ChessMonger – canvas‑proof with internal FEN and board‑API moves
+// ChessMonger – with turn‑wait retry loop
 
 const pieceMap = {
   'br':'r','bn':'n','bb':'b','bq':'q','bk':'k','bp':'p',
@@ -19,7 +19,9 @@ let boardObserver = null;
 let gameEndDetected = false;
 let isPlayingMove = false;
 let lastObservedBoardElement = null;
+let turnWaitRetries = 0;        // track retry attempts
 
+// ---- Orientation & game object ----
 function isFlipped() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   return board ? board.classList.contains('flipped') : false;
@@ -85,29 +87,22 @@ function getActiveColor() {
 function isUserTurn() {
   const active = getActiveColor();
   const user = ensureUserColor();
-  const result = active === user;
-  console.log(`ChessMonger: turn check – active=${active}, user=${user}, isMyTurn=${result}`);
-  return result;
+  return active === user;
 }
 
-// ★ FEN from internal game object – works even on canvas boards
+// ★ FEN from internal game object – works even on canvas
 function getFEN() {
   const game = getGameObject();
   if (game && typeof game.fen === 'function') {
     try {
       const fen = game.fen();
-      if (fen && typeof fen === 'string' && fen.includes(' ')) {
-        return fen;
-      }
+      if (fen && typeof fen === 'string' && fen.includes(' ')) return fen;
     } catch(e) {}
   }
-  // fallback: try to call turn() and build a minimal FEN? not reliable, so return last known FEN
-  if (lastFEN) return lastFEN;
-  // absolute last resort: build from DOM
+  // fallback to DOM (may be inaccurate)
   return buildFENFromDOM();
 }
 
-// Original DOM‑based FEN builder (kept as fallback)
 function buildFENFromDOM() {
   const board = Array(8).fill().map(()=>Array(8).fill(null));
   const flipped = isFlipped();
@@ -142,13 +137,12 @@ function buildFENFromDOM() {
 }
 
 function isBoardReady() {
-  // If we can get a game object with fen(), we are ready
   const game = getGameObject();
   if (game && typeof game.fen === 'function') return true;
-  // fallback: check for pieces in DOM
   return document.querySelectorAll('.piece').length >= 20;
 }
 
+// ---- Move execution (board‑API first) ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0)-97;
   const rank = 8-parseInt(square[1]);
@@ -168,100 +162,58 @@ function getSquareCenter(square) {
   return {x,y};
 }
 
-async function robustDragMove(from, to) {
+async function tryDragMove(from, to) {
   const fp = getSquareCenter(from);
   const tp = getSquareCenter(to);
-  if (!fp || !tp) return false;
-
+  if (!fp||!tp) return false;
   const piece = document.elementFromPoint(fp.x, fp.y);
-  if (!piece || !piece.classList.contains('piece')) {
-    console.warn(`ChessMonger: no piece at ${from} (board may be canvas-based)`);
-    return false;
-  }
-
-  console.log(`ChessMonger: dragging from ${from} to ${to}`);
-  piece.dispatchEvent(new PointerEvent('pointerdown', {
-    bubbles: true, cancelable: true, view: window,
-    clientX: fp.x, clientY: fp.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
-  }));
-  await new Promise(r=>setTimeout(r, 60));
-
-  const target = document.elementFromPoint(tp.x, tp.y) || document.body;
-  target.dispatchEvent(new PointerEvent('pointermove', {
-    bubbles: true, cancelable: true, view: window,
-    clientX: tp.x, clientY: tp.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
-  }));
-  await new Promise(r=>setTimeout(r, 40));
-
-  target.dispatchEvent(new PointerEvent('pointerup', {
-    bubbles: true, cancelable: true, view: window,
-    clientX: tp.x, clientY: tp.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
-  }));
+  if (!piece || !piece.classList.contains('piece')) return false;
+  piece.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, clientX:fp.x, clientY:fp.y, button:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+  await new Promise(r=>setTimeout(r,60));
+  const target = document.elementFromPoint(tp.x, tp.y)||document.body;
+  target.dispatchEvent(new PointerEvent('pointermove', {bubbles:true, cancelable:true, clientX:tp.x, clientY:tp.y, button:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+  await new Promise(r=>setTimeout(r,40));
+  target.dispatchEvent(new PointerEvent('pointerup', {bubbles:true, cancelable:true, clientX:tp.x, clientY:tp.y, button:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
   return true;
 }
 
 async function playMove(uci) {
-  const from = uci.substring(0,2);
-  const to = uci.substring(2,4);
+  const from = uci.substring(0,2), to = uci.substring(2,4);
   console.log(`ChessMonger: playing ${from}→${to}`);
   isPlayingMove = true;
 
-  // ★ PRIMARY: Board API – works always, even on canvas
+  // 1) Board API
   const boardEl = document.querySelector('chess-board');
   if (boardEl) {
     const chess = boardEl.game || boardEl.chess || window.chess;
     if (chess && typeof chess.move === 'function') {
-      try {
-        const result = chess.move({from, to, promotion:'q'});
-        if (result) {
-          console.log('ChessMonger: move via board API');
-          isPlayingMove = false;
-          return;
-        }
-      } catch(e) {
-        console.warn('ChessMonger: board API failed, trying drag', e);
-      }
+      try { chess.move({from,to,promotion:'q'}); console.log('move via API'); isPlayingMove = false; return; } catch(e){}
     }
   }
-
-  // ★ FALLBACK: Drag
-  let success = await robustDragMove(from, to);
-  if (success) {
-    await new Promise(r=>setTimeout(r, 400));
-    const newFEN = getFEN();
-    if (newFEN !== lastFEN) {
-      console.log('ChessMonger: move registered via drag');
-      isPlayingMove = false;
-      return;
-    }
-    console.warn('ChessMonger: drag did not register');
+  // 2) Drag fallback
+  if (await tryDragMove(from, to)) {
+    await new Promise(r=>setTimeout(r,400));
+    if (getFEN() !== lastFEN) { console.log('move via drag'); isPlayingMove = false; return; }
   }
-
-  // ★ LAST RESORT: Click
-  const fp = getSquareCenter(from);
-  const tp = getSquareCenter(to);
+  // 3) Click fallback
+  const fp = getSquareCenter(from), tp = getSquareCenter(to);
   if (fp && tp) {
-    const fromEl = document.elementFromPoint(fp.x, fp.y) || document.body;
-    fromEl.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:fp.x, clientY:fp.y, button:0}));
-    await new Promise(r=>setTimeout(r, 20));
-    const toEl = document.elementFromPoint(tp.x, tp.y) || document.body;
-    toEl.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, clientX:tp.x, clientY:tp.y, button:0}));
-    console.log('ChessMonger: attempted click move');
+    (document.elementFromPoint(fp.x,fp.y)||document.body).dispatchEvent(new MouseEvent('mousedown',{bubbles:true,clientX:fp.x,clientY:fp.y,button:0}));
+    await new Promise(r=>setTimeout(r,20));
+    (document.elementFromPoint(tp.x,tp.y)||document.body).dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:tp.x,clientY:tp.y,button:0}));
   }
-
   isPlayingMove = false;
 }
 
+// ---- Auto‑play scheduling ----
 function scheduleAutoPlay(moveUci, thinkTime) {
   cancelAutoPlay();
   selectedMove = moveUci;
   thinkingStart = Date.now();
-  console.log(`ChessMonger: scheduling ${moveUci} in ${thinkTime}ms`);
   autoPlayTimeout = setTimeout(() => {
     if (selectedMove === moveUci && isUserTurn() && isBoardReady()) {
       playMove(moveUci);
-      selectedMove = null;
-      thinkingStart = null;
+      selectedMove = null; thinkingStart = null;
     }
   }, thinkTime);
 }
@@ -281,54 +233,42 @@ function computeThinkTime(fen) {
   return Math.round(base*1000);
 }
 
+// ---- Game‑end & auto‑queue ----
 function checkGameEnd() {
   if (!lastFEN) return false;
   const selectors = [
-    '.game-over-modal', '[class*="game-over"]', '.post-game-modal',
-    '[class*="post-game"]', '.result-modal', '[class*="result-modal"]',
-    '.game-review-modal', '[class*="game-review"]',
-    '.game-end-modal', '[class*="game-end"]'
+    '.game-over-modal','[class*="game-over"]','.post-game-modal',
+    '[class*="post-game"]','.result-modal','[class*="result-modal"]',
+    '.game-review-modal','[class*="game-review"]',
+    '.game-end-modal','[class*="game-end"]'
   ];
   for (const sel of selectors) {
     const el = document.querySelector(sel);
     if (el && el.offsetParent !== null) return true;
   }
   const resultText = document.querySelector('.game-result, [class*="result"], .sidebar-result, .game-end-text, [class*="end-text"]');
-  if (resultText) {
-    const text = resultText.textContent?.toLowerCase() || '';
-    if (/\b(1\-0|0\-1|½\-½|won|drew|draw|resign|abandon|timeout|forfeit|stalemate|game over|game ended|won on time|white wins|black wins)\b/.test(text)) return true;
-  }
+  if (resultText && /\b(1\-0|0\-1|½\-½|won|drew|draw|resign|abandon|timeout|forfeit|stalemate|game over|game ended|won on time|white wins|black wins)\b/.test(resultText.textContent?.toLowerCase()||'')) return true;
   const reviewBtn = document.querySelector('[class*="game-review-button"], button[class*="review"], a[class*="review"]');
   if (reviewBtn) return true;
   const wc = document.querySelector('.clock-white, [class*="clock-white"]');
   const bc = document.querySelector('.clock-black, [class*="clock-black"]');
   if (wc && bc) {
-    const wt = wc.textContent?.trim() || '';
-    const bt = bc.textContent?.trim() || '';
-    if ((wt === '0:00' || wt === '0.0') && (bt === '0:00' || bt === '0.0')) return true;
+    const wt = wc.textContent?.trim()||'', bt = bc.textContent?.trim()||'';
+    if ((wt==='0:00'||wt==='0.0') && (bt==='0:00'||bt==='0.0')) return true;
   }
   return false;
 }
 
 function actuallyStartNextGame() {
   const buttons = document.querySelectorAll('button, a, span[role="button"]');
-  const texts = ['10 min', '10+0', 'new 10', 'play again 10'];
+  const texts = ['10 min','10+0','new 10','play again 10'];
   for (const btn of buttons) {
-    const t = btn.textContent?.toLowerCase() || '';
-    for (const x of texts) {
-      if (t.includes(x)) {
-        console.log('ChessMonger: starting next game');
-        btn.click();
-        return;
-      }
-    }
+    const t = btn.textContent?.toLowerCase()||'';
+    for (const x of texts) if (t.includes(x)) { btn.click(); return; }
   }
   for (const btn of buttons) {
-    const t = btn.textContent?.toLowerCase() || '';
-    if (t.includes('new game') || t.includes('play again')) {
-      btn.click();
-      return;
-    }
+    const t = btn.textContent?.toLowerCase()||'';
+    if (t.includes('new game')||t.includes('play again')) { btn.click(); return; }
   }
   window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
 }
@@ -336,20 +276,17 @@ function actuallyStartNextGame() {
 function tryStartNextGame() {
   if (gameEndDetected) return;
   gameEndDetected = true;
-  console.log('ChessMonger: game ended, queueing next');
-  if (Math.random() < 0.20) {
-    const mins = 2 + Math.random() * 6;
-    console.log(`ChessMonger: taking a ${Math.round(mins)}min break`);
-    setTimeout(() => actuallyStartNextGame(), mins * 60000);
+  if (Math.random()<0.20) {
+    const mins = 2+Math.random()*6;
+    setTimeout(()=>actuallyStartNextGame(), mins*60000);
     return;
   }
-  setTimeout(actuallyStartNextGame, 3000 + Math.random() * 5000);
+  setTimeout(actuallyStartNextGame, 3000+Math.random()*5000);
 }
 
 function resetGameEndDetection() {
   if (!gameEndDetected) return;
   if (document.querySelectorAll('.piece').length >= 28) {
-    console.log('ChessMonger: new game detected – resetting auto-queue');
     gameEndDetected = false;
   }
 }
@@ -357,14 +294,12 @@ function resetGameEndDetection() {
 function startGameEndObserver() {
   const obs = new MutationObserver(() => {
     resetGameEndDetection();
-    if (!gameEndDetected && checkGameEnd()) {
-      if (autoQueueEnabled) tryStartNextGame();
-    }
+    if (!gameEndDetected && checkGameEnd()) tryStartNextGame();
   });
-  obs.observe(document.body, { childList:true, subtree:true, attributes:true });
-  console.log('ChessMonger: game end observer started');
+  obs.observe(document.body, {childList:true, subtree:true, attributes:true});
 }
 
+// ---- Board observer ----
 function setupBoardObserver() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   const target = board || document.body;
@@ -372,24 +307,19 @@ function setupBoardObserver() {
   if (boardObserver) boardObserver.disconnect();
   lastObservedBoardElement = target;
   boardObserver = new MutationObserver(() => scheduleUpdate(400));
-  boardObserver.observe(target, {
-    childList: true,
-    subtree: true,
-    attributes: target !== document.body,
-    attributeFilter: target !== document.body ? ['class', 'style'] : undefined
-  });
-  console.log(`ChessMonger: board observer attached to ${target.tagName}`);
+  boardObserver.observe(target, {childList:true, subtree:true, attributes: target!==document.body, attributeFilter: target!==document.body?['class','style']:undefined});
 }
 
+// ---- Update loop with turn‑wait retry ----
 function scheduleUpdate(delay=400) {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(doUpdate, delay);
 }
 
 async function doUpdate() {
-  if (!isBoardReady()) return;
   if (isPlayingMove || requestInFlight) return;
   if (autoPlayTimeout && selectedMove && lastFEN && getFEN()===lastFEN) return;
+  if (!isBoardReady()) return;
 
   requestInFlight = true;
   if (requestTimer) clearTimeout(requestTimer);
@@ -397,40 +327,61 @@ async function doUpdate() {
 
   ensureUserColor();
   const fen = getFEN();
-  if (fen === lastFEN) { requestInFlight=false; return; }
+  if (fen === lastFEN) { requestInFlight = false; return; }
   lastFEN = fen;
   if (autoPlayTimeout) cancelAutoPlay();
 
-  console.log(`ChessMonger: requesting best move for FEN (${fen.substring(0,20)}...)`);
+  console.log(`ChessMonger: request move (${fen.substring(0,20)}...)`);
 
-  chrome.runtime.sendMessage({ type:'getMove', fen, time:0.5, multipv:1 }, (response) => {
+  chrome.runtime.sendMessage({type:'getMove', fen, time:0.5, multipv:1}, (response) => {
     requestInFlight = false;
-    if (!response?.moves?.length) {
-      console.warn('ChessMonger: no move received from engine');
-      return;
-    }
+    if (!response?.moves?.length) return;
     const chosen = response.moves[0];
     console.log(`ChessMonger: engine suggests ${chosen.uci}`);
-    if (autoPlayEnabled && isUserTurn()) {
-      const think = computeThinkTime(fen);
-      console.log(`ChessMonger: scheduling ${chosen.uci} in ${think}ms`);
-      scheduleAutoPlay(chosen.uci, think);
+
+    if (autoPlayEnabled) {
+      // ★ If it's our turn, schedule immediately
+      if (isUserTurn()) {
+        const think = computeThinkTime(fen);
+        console.log(`ChessMonger: scheduling ${chosen.uci} in ${think}ms`);
+        scheduleAutoPlay(chosen.uci, think);
+        turnWaitRetries = 0;
+      } else {
+        // Not our turn yet — wait and retry
+        if (turnWaitRetries < 8) {
+          turnWaitRetries++;
+          console.log(`ChessMonger: not our turn, retry ${turnWaitRetries}/8 in 600ms`);
+          setTimeout(() => {
+            // Only retry if board hasn't changed again
+            if (getFEN() === fen) {
+              doUpdate();
+            } else {
+              turnWaitRetries = 0;  // board changed, fresh start
+            }
+          }, 600);
+        } else {
+          console.log('ChessMonger: turn wait exhausted');
+          turnWaitRetries = 0;
+        }
+      }
     }
   });
 }
 
 function pollForOpponentMove() {
-  if (!isBoardReady()) return;
   if (isPlayingMove || requestInFlight) return;
+  if (!isBoardReady()) return;
   const fen = getFEN();
   if (fen !== lastFEN) {
-    console.log('ChessMonger: poll detected opponent move');
+    turnWaitRetries = 0;
     doUpdate();
   }
 }
 
+// ---- Init ----
 userColor = null;
 gameEndDetected = false;
+turnWaitRetries = 0;
 
 scheduleUpdate(1500);
 setupBoardObserver();
