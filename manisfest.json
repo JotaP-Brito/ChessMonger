@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "ChessMonger",
+  "version": "3.0",
+  "description": "Self‑contained chess bot – engine runs inside the browser.",
+  "permissions": ["scripting", "activeTab"],
+  "host_permissions": ["*://*.chess.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.chess.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["stockfish.js", "stockfish.wasm"],
+      "matches": ["*://*.chess.com/*"]
+    }
+  ],
+  "icons": {
+    "128": "icon.png"
+  }
+}
