@@ -1,0 +1,353 @@
+// ChessMonger – stealthy auto‑player with human‑like mouse movement
+
+// ---- Dynamic ID prefix (randomized per load) ----
+const ID = 'cm' + Math.random().toString(36).substring(2, 6);
+
+// ---- Piece map ----
+const pieceMap = {
+  'br':'r','bn':'n','bb':'b','bq':'q','bk':'k','bp':'p',
+  'wr':'R','wn':'N','wb':'B','wq':'Q','wk':'K','wp':'P'
+};
+
+// ---- Global state ----
+let autoPlayEnabled = true;       // always on
+let autoQueueEnabled = true;      // sequential matchmaking
+let autoPlayTimeout = null;
+let selectedMove = null;
+let thinkingStart = null;
+let lastFEN = null;
+let userColor = null;
+let requestInFlight = false;
+let requestTimer = null;
+let debounceTimer = null;
+let observer = null;
+let gameEndDetected = false;
+let isPlayingMove = false;
+
+// ---- Orientation & game object ----
+function isFlipped() {
+  const board = document.querySelector('chess-board') || document.querySelector('.board');
+  return board ? board.classList.contains('flipped') : false;
+}
+function getGameObject() {
+  try {
+    const boardEl = document.querySelector('chess-board');
+    if (!boardEl) return null;
+    for (const key of Object.keys(boardEl)) {
+      const val = boardEl[key];
+      if (val && typeof val.turn === 'function' && typeof val.myColor === 'function') return val;
+    }
+    if (boardEl.game?.turn) return boardEl.game;
+    if (boardEl.chess?.turn) return boardEl.chess;
+    if (window.chess?.turn) return window.chess;
+  } catch(e){}
+  return null;
+}
+
+// ---- Colour detection ----
+function detectUserColor() {
+  const game = getGameObject();
+  if (game) {
+    try {
+      let c = game.myColor?.();
+      if (c === 'white') return 'w';
+      if (c === 'black') return 'b';
+    } catch(e){}
+  }
+  if (isFlipped()) return 'b';
+  return 'w';
+}
+function ensureUserColor() {
+  if (!userColor) userColor = detectUserColor();
+  return userColor;
+}
+
+// ---- Active colour ----
+function getActiveColor() {
+  const game = getGameObject();
+  if (game && typeof game.turn === 'function') {
+    try {
+      let t = game.turn();
+      if (t === 'white') return 'w';
+      if (t === 'black') return 'b';
+    } catch(e){}
+  }
+  const w = document.querySelector('.clock-white.clock-active, [class*="clock"][class*="white"][class*="active"]');
+  const b = document.querySelector('.clock-black.clock-active, [class*="clock"][class*="black"][class*="active"]');
+  if (b && !w) return 'b';
+  if (w && !b) return 'w';
+  const items = document.querySelectorAll('[class*="move-list"] [class*="move"]:not([class*="move-number"])');
+  if (items.length) {
+    const half = Math.floor(items.length / 2);
+    return half % 2 === 0 ? 'w' : 'b';
+  }
+  return 'w';
+}
+function isUserTurn() {
+  return getActiveColor() === ensureUserColor();
+}
+
+// ---- Build FEN ----
+function getFEN() {
+  const board = Array(8).fill().map(()=>Array(8).fill(null));
+  const flipped = isFlipped();
+  document.querySelectorAll('.piece').forEach(piece => {
+    const cls = [...piece.classList];
+    const pc = cls.find(c=>pieceMap[c]);
+    if (!pc) return;
+    const sq = cls.find(c=>c.startsWith('square-'));
+    if (!sq) return;
+    const s = sq.replace('square-','');
+    if (s.length<2) return;
+    let col = parseInt(s[0])-1;
+    let row = 8-parseInt(s[1]);
+    if (flipped) { col = 7-col; row = 7-row; }
+    if (row>=0 && row<8 && col>=0 && col<8) board[row][col] = pieceMap[pc];
+  });
+  let fen = '';
+  for (let r=0; r<8; r++) {
+    let empty=0;
+    for (let c=0; c<8; c++) {
+      if (board[r][c]===null) empty++;
+      else {
+        if (empty>0) { fen+=empty; empty=0; }
+        fen+=board[r][c];
+      }
+    }
+    if (empty>0) fen+=empty;
+    if (r<7) fen+='/';
+  }
+  fen += ` ${getActiveColor()} - - 0 1`;
+  return fen;
+}
+
+// ---- Human‑like mouse movement ----
+function getSquareCenter(square) {
+  const file = square.charCodeAt(0)-97;
+  const rank = 8-parseInt(square[1]);
+  const boardEl = document.querySelector('chess-board') || document.querySelector('.board');
+  if (!boardEl) return null;
+  const rect = boardEl.getBoundingClientRect();
+  const sq = rect.width/8;
+  const flipped = isFlipped();
+  let x,y;
+  if (flipped) {
+    x = rect.left + (7-file)*sq + sq/2;
+    y = rect.top + (7-rank)*sq + sq/2;
+  } else {
+    x = rect.left + file*sq + sq/2;
+    y = rect.top + rank*sq + sq/2;
+  }
+  return {x,y};
+}
+async function humanMouseMove(fromX, fromY, toX, toY, duration=150) {
+  const steps = Math.max(5, Math.floor(duration/20));
+  const dx = toX - fromX;
+  const dy = toY - fromY;
+  for (let i=1; i<=steps; i++) {
+    const t = i/steps;
+    const eased = t<0.5 ? 2*t*t : -1+(4-2*t)*t;
+    const cx = fromX + dx * eased;
+    const cy = fromY + dy * eased;
+    document.dispatchEvent(new PointerEvent('pointermove', {
+      bubbles:true, cancelable:true, view:window,
+      clientX:cx, clientY:cy, button:0, pointerId:1, pointerType:'mouse', isPrimary:true
+    }));
+    await new Promise(r=>setTimeout(r, duration/steps + Math.random()*10));
+  }
+}
+async function tryDragMove(from, to) {
+  const fp = getSquareCenter(from);
+  const tp = getSquareCenter(to);
+  if (!fp||!tp) return false;
+  // Move to piece with slight curve
+  await humanMouseMove(fp.x+Math.random()*20-10, fp.y+Math.random()*20-10, fp.x, fp.y, 200);
+  const piece = document.elementFromPoint(fp.x, fp.y);
+  if (!piece) return false;
+  piece.dispatchEvent(new PointerEvent('pointerdown', {
+    bubbles:true, cancelable:true, view:window,
+    clientX:fp.x, clientY:fp.y, button:0, pointerId:1, pointerType:'mouse', isPrimary:true
+  }));
+  await new Promise(r=>setTimeout(r, 50+Math.random()*100));
+  await humanMouseMove(fp.x, fp.y, tp.x, tp.y, 250+Math.random()*200);
+  const targetEl = document.elementFromPoint(tp.x, tp.y) || document.body;
+  targetEl.dispatchEvent(new PointerEvent('pointerup', {
+    bubbles:true, cancelable:true, view:window,
+    clientX:tp.x, clientY:tp.y, button:0, pointerId:1, pointerType:'mouse', isPrimary:true
+  }));
+  return true;
+}
+
+// ---- Move execution ----
+async function playMove(uci) {
+  const from = uci.substring(0,2);
+  const to = uci.substring(2,4);
+  console.log(`ChessMonger: playing ${from}→${to}`);
+  isPlayingMove = true;
+  await tryDragMove(from, to);
+  await new Promise(r=>setTimeout(r, 400));
+  isPlayingMove = false;
+}
+
+// ---- Auto‑play scheduling ----
+function scheduleAutoPlay(moveUci, thinkTime) {
+  cancelAutoPlay();
+  selectedMove = moveUci;
+  thinkingStart = Date.now();
+  autoPlayTimeout = setTimeout(() => {
+    if (selectedMove === moveUci && isUserTurn()) {
+      playMove(moveUci);
+      selectedMove = null;
+      thinkingStart = null;
+    }
+  }, thinkTime);
+}
+function cancelAutoPlay() {
+  if (autoPlayTimeout) { clearTimeout(autoPlayTimeout); autoPlayTimeout = null; }
+  selectedMove = null; thinkingStart = null;
+}
+
+// ---- Thinking time (very erratic) ----
+function computeThinkTime(fen) {
+  const pieces = fen.split(' ')[0].replace(/[\/0-9]/g,'').length;
+  const isEnd = pieces<=12;
+  if (Math.random()<0.05) return 100+Math.random()*300;           // instant
+  if (Math.random()<0.05) return 15000+Math.random()*30000;      // afk
+  if (Math.random()<0.1)  return 8000+Math.random()*7000;       // long think
+  let base = isEnd ? 0.5+Math.random()*2.5 : 2+Math.random()*8;
+  return Math.round(base*1000);
+}
+
+// ---- Game‑end detection & auto‑queue ----
+function checkGameEnd() {
+  const selectors = [
+    '.game-over-modal', '[class*="game-over"]', '.post-game-modal',
+    '[class*="post-game"]', '.result-modal', '[class*="result-modal"]',
+    '.game-review-modal', '[class*="game-review"]',
+    '.game-end-modal', '[class*="game-end"]'
+  ];
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el && el.offsetParent !== null) return true;
+  }
+  const resultText = document.querySelector('.game-result, [class*="result"], .sidebar-result, .game-end-text, [class*="end-text"]');
+  if (resultText) {
+    const text = resultText.textContent?.toLowerCase() || '';
+    if (/\b(1\-0|0\-1|½\-½|won|drew|draw|resign|abandon|timeout|forfeit|stalemate|game over|game ended|won on time|white wins|black wins)\b/.test(text)) return true;
+  }
+  const reviewBtn = document.querySelector('[class*="game-review-button"], button[class*="review"], a[class*="review"]');
+  if (reviewBtn) return true;
+  const wc = document.querySelector('.clock-white, [class*="clock-white"]');
+  const bc = document.querySelector('.clock-black, [class*="clock-black"]');
+  if (wc && bc) {
+    const wt = wc.textContent?.trim() || '';
+    const bt = bc.textContent?.trim() || '';
+    if ((wt === '0:00' || wt === '0.0') && (bt === '0:00' || bt === '0.0')) return true;
+  }
+  return false;
+}
+function actuallyStartNextGame() {
+  const buttons = document.querySelectorAll('button, a, span[role="button"]');
+  const texts = ['10 min', '10+0', 'new 10', 'play again 10'];
+  for (const btn of buttons) {
+    const t = btn.textContent?.toLowerCase() || '';
+    for (const x of texts) {
+      if (t.includes(x)) {
+        console.log('ChessMonger: starting next game');
+        btn.click();
+        return;
+      }
+    }
+  }
+  for (const btn of buttons) {
+    const t = btn.textContent?.toLowerCase() || '';
+    if (t.includes('new game') || t.includes('play again')) {
+      btn.click();
+      return;
+    }
+  }
+  window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
+}
+function tryStartNextGame() {
+  if (gameEndDetected) return;
+  gameEndDetected = true;
+  console.log('ChessMonger: game ended, queueing next');
+  // 20% chance of a break (2‑8 min)
+  if (Math.random() < 0.20) {
+    const mins = 2 + Math.random() * 6;
+    console.log(`ChessMonger: taking a ${Math.round(mins)}min break`);
+    setTimeout(() => actuallyStartNextGame(), mins * 60000);
+    return;
+  }
+  // Immediate queue (with a short human‑like delay)
+  setTimeout(actuallyStartNextGame, 3000 + Math.random() * 5000);
+}
+function resetGameEndDetection() {
+  if (!gameEndDetected) return;
+  const pieces = document.querySelectorAll('.piece');
+  if (pieces.length >= 28) {
+    console.log('ChessMonger: new game detected');
+    gameEndDetected = false;
+  }
+}
+
+// ---- Observers ----
+function ensureBoardObserver() {
+  const board = document.querySelector('chess-board') || document.querySelector('.board');
+  if (observer) observer.disconnect();
+  if (board) {
+    observer = new MutationObserver(() => scheduleUpdate(400));
+    observer.observe(board, { childList:true, subtree:true, attributes:true, attributeFilter:['class','style'] });
+  } else {
+    observer = new MutationObserver(() => scheduleUpdate(400));
+    observer.observe(document.body, { childList:true, subtree:true, attributes:false });
+  }
+}
+function startGameEndObserver() {
+  const obs = new MutationObserver(() => {
+    resetGameEndDetection();
+    if (!gameEndDetected && checkGameEnd()) {
+      if (autoQueueEnabled) tryStartNextGame();
+    }
+  });
+  obs.observe(document.body, { childList:true, subtree:true, attributes:true });
+}
+
+// ---- Update loop ----
+function scheduleUpdate(delay=400) {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(doUpdate, delay);
+}
+async function doUpdate() {
+  if (isPlayingMove || requestInFlight) return;
+  if (autoPlayTimeout && selectedMove && lastFEN && getFEN()===lastFEN) return;
+
+  requestInFlight = true;
+  if (requestTimer) clearTimeout(requestTimer);
+  requestTimer = setTimeout(()=>{ requestInFlight=false; }, 8000);
+
+  ensureUserColor();
+  const fen = getFEN();
+  if (fen === lastFEN) { requestInFlight=false; return; }
+  lastFEN = fen;
+  if (autoPlayTimeout) cancelAutoPlay();
+
+  chrome.runtime.sendMessage({ type:'getMove', fen, time:0.5, multipv:1 }, (response) => {
+    requestInFlight = false;
+    if (!response?.moves?.length) return;
+    const chosen = response.moves[0];
+    if (autoPlayEnabled && isUserTurn()) {
+      const think = computeThinkTime(fen);
+      scheduleAutoPlay(chosen.uci, think);
+    }
+  });
+}
+
+// ---- Init ----
+userColor = null;
+gameEndDetected = false;
+scheduleUpdate(1500);
+ensureBoardObserver();
+startGameEndObserver();
+setInterval(ensureBoardObserver, 10000);
+setInterval(()=>scheduleUpdate(0), 3000);
