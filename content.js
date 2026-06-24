@@ -1,4 +1,4 @@
-// ChessMonger – stealthy auto‑player with human‑like mouse movement
+// ChessMonger – stealthy auto‑player with logging
 
 const pieceMap = {
   'br':'r','bn':'n','bb':'b','bq':'q','bk':'k','bp':'p',
@@ -53,7 +53,10 @@ function detectUserColor() {
 }
 
 function ensureUserColor() {
-  if (!userColor) userColor = detectUserColor();
+  if (!userColor) {
+    userColor = detectUserColor();
+    console.log('ChessMonger: detected user color =', userColor);
+  }
   return userColor;
 }
 
@@ -79,7 +82,11 @@ function getActiveColor() {
 }
 
 function isUserTurn() {
-  return getActiveColor() === ensureUserColor();
+  const active = getActiveColor();
+  const user = ensureUserColor();
+  const result = active === user;
+  console.log(`ChessMonger: turn check – active=${active}, user=${user}, isMyTurn=${result}`);
+  return result;
 }
 
 function getFEN() {
@@ -154,10 +161,16 @@ async function humanMouseMove(fromX, fromY, toX, toY, duration=150) {
 async function tryDragMove(from, to) {
   const fp = getSquareCenter(from);
   const tp = getSquareCenter(to);
-  if (!fp||!tp) return false;
+  if (!fp||!tp) {
+    console.warn('ChessMonger: could not get square centers');
+    return false;
+  }
   await humanMouseMove(fp.x+Math.random()*20-10, fp.y+Math.random()*20-10, fp.x, fp.y, 200);
   const piece = document.elementFromPoint(fp.x, fp.y);
-  if (!piece) return false;
+  if (!piece) {
+    console.warn('ChessMonger: no piece at source');
+    return false;
+  }
   piece.dispatchEvent(new PointerEvent('pointerdown', {
     bubbles:true, cancelable:true, view:window,
     clientX:fp.x, clientY:fp.y, button:0, pointerId:1, pointerType:'mouse', isPrimary:true
@@ -186,6 +199,7 @@ function scheduleAutoPlay(moveUci, thinkTime) {
   cancelAutoPlay();
   selectedMove = moveUci;
   thinkingStart = Date.now();
+  console.log(`ChessMonger: scheduling ${moveUci} in ${thinkTime}ms`);
   autoPlayTimeout = setTimeout(() => {
     if (selectedMove === moveUci && isUserTurn()) {
       playMove(moveUci);
@@ -211,9 +225,7 @@ function computeThinkTime(fen) {
 }
 
 function checkGameEnd() {
-  // Only detect game end if we have a lastFEN (meaning a game was in progress)
   if (!lastFEN) return false;
-
   const selectors = [
     '.game-over-modal', '[class*="game-over"]', '.post-game-modal',
     '[class*="post-game"]', '.result-modal', '[class*="result-modal"]',
