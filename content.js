@@ -1,4 +1,4 @@
-// ChessMonger – coordinate‑based piece finding
+// ChessMonger – board‑API‑first move execution
 
 const pieceMap = {
   'br':'r','bn':'n','bb':'b','bq':'q','bk':'k','bp':'p',
@@ -151,10 +151,9 @@ async function robustDragMove(from, to) {
   const tp = getSquareCenter(to);
   if (!fp || !tp) return false;
 
-  // Use coordinate to find the piece
   const piece = document.elementFromPoint(fp.x, fp.y);
   if (!piece || !piece.classList.contains('piece')) {
-    console.warn(`ChessMonger: no piece at ${from}`);
+    console.warn(`ChessMonger: no piece at ${from} (board may be canvas-based)`);
     return false;
   }
 
@@ -185,41 +184,44 @@ async function playMove(uci) {
   console.log(`ChessMonger: playing ${from}→${to}`);
   isPlayingMove = true;
 
-  // 1. Try drag
+  // ★ PRIMARY: Board API
+  const boardEl = document.querySelector('chess-board');
+  if (boardEl) {
+    const chess = boardEl.game || boardEl.chess || window.chess;
+    if (chess && typeof chess.move === 'function') {
+      try {
+        const result = chess.move({from, to, promotion:'q'});
+        if (result) {
+          console.log('ChessMonger: move via board API');
+          isPlayingMove = false;
+          return;
+        }
+      } catch(e) {
+        console.warn('ChessMonger: board API failed, trying drag', e);
+      }
+    }
+  }
+
+  // ★ FALLBACK: Drag
   let success = await robustDragMove(from, to);
   if (success) {
     await new Promise(r=>setTimeout(r, 400));
     const newFEN = getFEN();
     if (newFEN !== lastFEN) {
-      console.log('ChessMonger: move registered');
+      console.log('ChessMonger: move registered via drag');
       isPlayingMove = false;
       return;
     }
     console.warn('ChessMonger: drag did not register');
   }
 
-  // 2. Fallback: board API
-  const boardEl = document.querySelector('chess-board');
-  if (boardEl) {
-    const chess = boardEl.game || boardEl.chess || window.chess;
-    if (chess && typeof chess.move === 'function') {
-      try {
-        chess.move({from, to, promotion:'q'});
-        console.log('ChessMonger: move via board API');
-        isPlayingMove = false;
-        return;
-      } catch(e) {
-        console.error('ChessMonger: board API failed', e);
-      }
-    }
-  }
-
-  // 3. Fallback: simple click-based move (click from square then to square)
+  // ★ LAST RESORT: Click
   const fp = getSquareCenter(from);
   const tp = getSquareCenter(to);
   if (fp && tp) {
     const fromEl = document.elementFromPoint(fp.x, fp.y) || document.body;
     fromEl.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:fp.x, clientY:fp.y, button:0}));
+    await new Promise(r=>setTimeout(r, 20));
     const toEl = document.elementFromPoint(tp.x, tp.y) || document.body;
     toEl.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, clientX:tp.x, clientY:tp.y, button:0}));
     console.log('ChessMonger: attempted click move');
