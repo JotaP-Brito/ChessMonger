@@ -1,17 +1,12 @@
 // ChessMonger – stealthy auto‑player with human‑like mouse movement
 
-// ---- Dynamic ID prefix (randomized per load) ----
-const ID = 'cm' + Math.random().toString(36).substring(2, 6);
-
-// ---- Piece map ----
 const pieceMap = {
   'br':'r','bn':'n','bb':'b','bq':'q','bk':'k','bp':'p',
   'wr':'R','wn':'N','wb':'B','wq':'Q','wk':'K','wp':'P'
 };
 
-// ---- Global state ----
-let autoPlayEnabled = true;       // always on
-let autoQueueEnabled = true;      // sequential matchmaking
+let autoPlayEnabled = true;
+let autoQueueEnabled = true;
 let autoPlayTimeout = null;
 let selectedMove = null;
 let thinkingStart = null;
@@ -24,11 +19,11 @@ let observer = null;
 let gameEndDetected = false;
 let isPlayingMove = false;
 
-// ---- Orientation & game object ----
 function isFlipped() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   return board ? board.classList.contains('flipped') : false;
 }
+
 function getGameObject() {
   try {
     const boardEl = document.querySelector('chess-board');
@@ -44,7 +39,6 @@ function getGameObject() {
   return null;
 }
 
-// ---- Colour detection ----
 function detectUserColor() {
   const game = getGameObject();
   if (game) {
@@ -57,12 +51,12 @@ function detectUserColor() {
   if (isFlipped()) return 'b';
   return 'w';
 }
+
 function ensureUserColor() {
   if (!userColor) userColor = detectUserColor();
   return userColor;
 }
 
-// ---- Active colour ----
 function getActiveColor() {
   const game = getGameObject();
   if (game && typeof game.turn === 'function') {
@@ -83,11 +77,11 @@ function getActiveColor() {
   }
   return 'w';
 }
+
 function isUserTurn() {
   return getActiveColor() === ensureUserColor();
 }
 
-// ---- Build FEN ----
 function getFEN() {
   const board = Array(8).fill().map(()=>Array(8).fill(null));
   const flipped = isFlipped();
@@ -121,7 +115,6 @@ function getFEN() {
   return fen;
 }
 
-// ---- Human‑like mouse movement ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0)-97;
   const rank = 8-parseInt(square[1]);
@@ -140,6 +133,7 @@ function getSquareCenter(square) {
   }
   return {x,y};
 }
+
 async function humanMouseMove(fromX, fromY, toX, toY, duration=150) {
   const steps = Math.max(5, Math.floor(duration/20));
   const dx = toX - fromX;
@@ -156,11 +150,11 @@ async function humanMouseMove(fromX, fromY, toX, toY, duration=150) {
     await new Promise(r=>setTimeout(r, duration/steps + Math.random()*10));
   }
 }
+
 async function tryDragMove(from, to) {
   const fp = getSquareCenter(from);
   const tp = getSquareCenter(to);
   if (!fp||!tp) return false;
-  // Move to piece with slight curve
   await humanMouseMove(fp.x+Math.random()*20-10, fp.y+Math.random()*20-10, fp.x, fp.y, 200);
   const piece = document.elementFromPoint(fp.x, fp.y);
   if (!piece) return false;
@@ -178,7 +172,6 @@ async function tryDragMove(from, to) {
   return true;
 }
 
-// ---- Move execution ----
 async function playMove(uci) {
   const from = uci.substring(0,2);
   const to = uci.substring(2,4);
@@ -189,7 +182,6 @@ async function playMove(uci) {
   isPlayingMove = false;
 }
 
-// ---- Auto‑play scheduling ----
 function scheduleAutoPlay(moveUci, thinkTime) {
   cancelAutoPlay();
   selectedMove = moveUci;
@@ -202,24 +194,26 @@ function scheduleAutoPlay(moveUci, thinkTime) {
     }
   }, thinkTime);
 }
+
 function cancelAutoPlay() {
   if (autoPlayTimeout) { clearTimeout(autoPlayTimeout); autoPlayTimeout = null; }
   selectedMove = null; thinkingStart = null;
 }
 
-// ---- Thinking time (very erratic) ----
 function computeThinkTime(fen) {
   const pieces = fen.split(' ')[0].replace(/[\/0-9]/g,'').length;
   const isEnd = pieces<=12;
-  if (Math.random()<0.05) return 100+Math.random()*300;           // instant
-  if (Math.random()<0.05) return 15000+Math.random()*30000;      // afk
-  if (Math.random()<0.1)  return 8000+Math.random()*7000;       // long think
+  if (Math.random()<0.05) return 100+Math.random()*300;
+  if (Math.random()<0.05) return 15000+Math.random()*30000;
+  if (Math.random()<0.1)  return 8000+Math.random()*7000;
   let base = isEnd ? 0.5+Math.random()*2.5 : 2+Math.random()*8;
   return Math.round(base*1000);
 }
 
-// ---- Game‑end detection & auto‑queue ----
 function checkGameEnd() {
+  // Only detect game end if we have a lastFEN (meaning a game was in progress)
+  if (!lastFEN) return false;
+
   const selectors = [
     '.game-over-modal', '[class*="game-over"]', '.post-game-modal',
     '[class*="post-game"]', '.result-modal', '[class*="result-modal"]',
@@ -246,6 +240,7 @@ function checkGameEnd() {
   }
   return false;
 }
+
 function actuallyStartNextGame() {
   const buttons = document.querySelectorAll('button, a, span[role="button"]');
   const texts = ['10 min', '10+0', 'new 10', 'play again 10'];
@@ -268,41 +263,42 @@ function actuallyStartNextGame() {
   }
   window.location.href = 'https://www.chess.com/play/online/new?action=createLiveChallenge&base=600&timeIncrement=0&rated=rated';
 }
+
 function tryStartNextGame() {
   if (gameEndDetected) return;
   gameEndDetected = true;
   console.log('ChessMonger: game ended, queueing next');
-  // 20% chance of a break (2‑8 min)
   if (Math.random() < 0.20) {
     const mins = 2 + Math.random() * 6;
     console.log(`ChessMonger: taking a ${Math.round(mins)}min break`);
     setTimeout(() => actuallyStartNextGame(), mins * 60000);
     return;
   }
-  // Immediate queue (with a short human‑like delay)
   setTimeout(actuallyStartNextGame, 3000 + Math.random() * 5000);
 }
+
 function resetGameEndDetection() {
   if (!gameEndDetected) return;
-  const pieces = document.querySelectorAll('.piece');
-  if (pieces.length >= 28) {
-    console.log('ChessMonger: new game detected');
+  if (document.querySelectorAll('.piece').length >= 28) {
+    console.log('ChessMonger: new game detected – resetting auto-queue');
     gameEndDetected = false;
   }
 }
 
-// ---- Observers ----
 function ensureBoardObserver() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   if (observer) observer.disconnect();
   if (board) {
     observer = new MutationObserver(() => scheduleUpdate(400));
     observer.observe(board, { childList:true, subtree:true, attributes:true, attributeFilter:['class','style'] });
+    console.log('ChessMonger: board observer attached');
   } else {
     observer = new MutationObserver(() => scheduleUpdate(400));
     observer.observe(document.body, { childList:true, subtree:true, attributes:false });
+    console.warn('ChessMonger: board not found, observing body');
   }
 }
+
 function startGameEndObserver() {
   const obs = new MutationObserver(() => {
     resetGameEndDetection();
@@ -311,13 +307,14 @@ function startGameEndObserver() {
     }
   });
   obs.observe(document.body, { childList:true, subtree:true, attributes:true });
+  console.log('ChessMonger: game end observer started');
 }
 
-// ---- Update loop ----
 function scheduleUpdate(delay=400) {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(doUpdate, delay);
 }
+
 async function doUpdate() {
   if (isPlayingMove || requestInFlight) return;
   if (autoPlayTimeout && selectedMove && lastFEN && getFEN()===lastFEN) return;
@@ -332,18 +329,24 @@ async function doUpdate() {
   lastFEN = fen;
   if (autoPlayTimeout) cancelAutoPlay();
 
+  console.log(`ChessMonger: requesting best move for FEN (${fen.substring(0,20)}...)`);
+
   chrome.runtime.sendMessage({ type:'getMove', fen, time:0.5, multipv:1 }, (response) => {
     requestInFlight = false;
-    if (!response?.moves?.length) return;
+    if (!response?.moves?.length) {
+      console.warn('ChessMonger: no move received from engine');
+      return;
+    }
     const chosen = response.moves[0];
+    console.log(`ChessMonger: engine suggests ${chosen.uci}`);
     if (autoPlayEnabled && isUserTurn()) {
       const think = computeThinkTime(fen);
+      console.log(`ChessMonger: scheduling ${chosen.uci} in ${think}ms`);
       scheduleAutoPlay(chosen.uci, think);
     }
   });
 }
 
-// ---- Init ----
 userColor = null;
 gameEndDetected = false;
 scheduleUpdate(1500);
