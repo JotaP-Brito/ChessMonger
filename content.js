@@ -1,4 +1,4 @@
-// ChessMonger – stealthy auto‑player with reliable opponent detection
+// ChessMonger – with robust move execution
 
 const pieceMap = {
   'br':'r','bn':'n','bb':'b','bq':'q','bk':'k','bp':'p',
@@ -15,12 +15,12 @@ let userColor = null;
 let requestInFlight = false;
 let requestTimer = null;
 let debounceTimer = null;
-let boardObserver = null;       // renamed to avoid conflict with game‑end observer
+let boardObserver = null;
 let gameEndDetected = false;
 let isPlayingMove = false;
-let lastObservedBoardElement = null;  // track which element is being observed
+let lastObservedBoardElement = null;
 
-// ---- Helper functions (unchanged) ----
+// ---- Helper functions ----
 function isFlipped() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   return board ? board.classList.contains('flipped') : false;
@@ -124,7 +124,7 @@ function getFEN() {
   return fen;
 }
 
-// ---- Mouse movement and drag (unchanged) ----
+// ---- Square center (used by drag) ----
 function getSquareCenter(square) {
   const file = square.charCodeAt(0)-97;
   const rank = 8-parseInt(square[1]);
@@ -144,40 +144,52 @@ function getSquareCenter(square) {
   return {x,y};
 }
 
-async function humanMouseMove(fromX, fromY, toX, toY, duration=150) {
-  const steps = Math.max(5, Math.floor(duration/20));
-  const dx = toX - fromX;
-  const dy = toY - fromY;
-  for (let i=1; i<=steps; i++) {
-    const t = i/steps;
-    const eased = t<0.5 ? 2*t*t : -1+(4-2*t)*t;
-    const cx = fromX + dx * eased;
-    const cy = fromY + dy * eased;
-    document.dispatchEvent(new PointerEvent('pointermove', {
-      bubbles:true, cancelable:true, view:window,
-      clientX:cx, clientY:cy, button:0, pointerId:1, pointerType:'mouse', isPrimary:true
-    }));
-    await new Promise(r=>setTimeout(r, duration/steps + Math.random()*10));
+// ---- Robust drag using direct piece element lookup ----
+function findPieceOnSquare(square) {
+  // square like 'e2'
+  const targetSquareClass = `square-${square.charCodeAt(0)-96}${square[1]}`; // square-55 for e2? Wait, chess.com uses square-XY where X=file, Y=rank. e2 = file 5, rank 2 => square-52.
+  const file = square.charCodeAt(0) - 96; // a=1, b=2, ..., h=8
+  const rank = parseInt(square[1]);
+  const className = `square-${file}${rank}`;
+  const squareEl = document.querySelector(`.${className}`);
+  if (squareEl) {
+    return squareEl.querySelector('.piece');
   }
+  return null;
 }
 
-async function tryDragMove(from, to) {
+async function robustDragMove(from, to) {
+  // Method 1: Use direct piece lookup
+  const piece = findPieceOnSquare(from);
+  if (!piece) {
+    console.warn(`ChessMonger: no piece found on ${from}`);
+    return false;
+  }
   const fp = getSquareCenter(from);
   const tp = getSquareCenter(to);
-  if (!fp||!tp) return false;
-  await humanMouseMove(fp.x+Math.random()*20-10, fp.y+Math.random()*20-10, fp.x, fp.y, 200);
-  const piece = document.elementFromPoint(fp.x, fp.y);
-  if (!piece) return false;
+  if (!fp || !tp) {
+    console.warn('ChessMonger: could not get square centers');
+    return false;
+  }
+
+  // Simulate a simple drag
+  console.log(`ChessMonger: dragging from ${from} to ${to}`);
   piece.dispatchEvent(new PointerEvent('pointerdown', {
-    bubbles:true, cancelable:true, view:window,
-    clientX:fp.x, clientY:fp.y, button:0, pointerId:1, pointerType:'mouse', isPrimary:true
+    bubbles: true, cancelable: true, view: window,
+    clientX: fp.x, clientY: fp.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
-  await new Promise(r=>setTimeout(r, 50+Math.random()*100));
-  await humanMouseMove(fp.x, fp.y, tp.x, tp.y, 250+Math.random()*200);
-  const targetEl = document.elementFromPoint(tp.x, tp.y) || document.body;
-  targetEl.dispatchEvent(new PointerEvent('pointerup', {
-    bubbles:true, cancelable:true, view:window,
-    clientX:tp.x, clientY:tp.y, button:0, pointerId:1, pointerType:'mouse', isPrimary:true
+  await new Promise(r=>setTimeout(r, 60));
+
+  const targetSquareEl = findPieceOnSquare(to) || document.querySelector(`.square-${to.charCodeAt(0)-96}${to[1]}`) || document.body;
+  targetSquareEl.dispatchEvent(new PointerEvent('pointermove', {
+    bubbles: true, cancelable: true, view: window,
+    clientX: tp.x, clientY: tp.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
+  }));
+  await new Promise(r=>setTimeout(r, 40));
+
+  targetSquareEl.dispatchEvent(new PointerEvent('pointerup', {
+    bubbles: true, cancelable: true, view: window,
+    clientX: tp.x, clientY: tp.y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true
   }));
   return true;
 }
@@ -187,8 +199,33 @@ async function playMove(uci) {
   const to = uci.substring(2,4);
   console.log(`ChessMonger: playing ${from}→${to}`);
   isPlayingMove = true;
-  await tryDragMove(from, to);
-  await new Promise(r=>setTimeout(r, 400));
+
+  // Try robust drag
+  let success = await robustDragMove(from, to);
+  if (success) {
+    await new Promise(r=>setTimeout(r, 400));
+    // Verify FEN changed
+    const newFEN = getFEN();
+    if (newFEN === lastFEN) {
+      console.warn('ChessMonger: drag did not register, trying fallback click...');
+      // Fallback: try text input or board API
+      const boardEl = document.querySelector('chess-board');
+      if (boardEl) {
+        const chess = boardEl.game || boardEl.chess || window.chess;
+        if (chess && typeof chess.move === 'function') {
+          try {
+            chess.move({from, to, promotion:'q'});
+            console.log('ChessMonger: move via board API');
+          } catch(e) {
+            console.error('ChessMonger: board API failed', e);
+          }
+        }
+      }
+    }
+  } else {
+    console.warn('ChessMonger: drag failed completely');
+  }
+
   isPlayingMove = false;
 }
 
@@ -307,31 +344,20 @@ function startGameEndObserver() {
   console.log('ChessMonger: game end observer started');
 }
 
-// ---- Board change observer (stable, no unnecessary reconnections) ----
+// ---- Board change observer ----
 function setupBoardObserver() {
   const board = document.querySelector('chess-board') || document.querySelector('.board');
   const target = board || document.body;
-
-  // If we're already observing the same element, do nothing
   if (lastObservedBoardElement === target) return;
-
-  // Disconnect old observer if any
   if (boardObserver) boardObserver.disconnect();
-
   lastObservedBoardElement = target;
-
-  boardObserver = new MutationObserver(() => {
-    // Debounced update when the board changes
-    scheduleUpdate(400);
-  });
-
+  boardObserver = new MutationObserver(() => scheduleUpdate(400));
   boardObserver.observe(target, {
     childList: true,
     subtree: true,
-    attributes: target !== document.body,       // only on board, not body
+    attributes: target !== document.body,
     attributeFilter: target !== document.body ? ['class', 'style'] : undefined
   });
-
   console.log(`ChessMonger: board observer attached to ${target.tagName}`);
 }
 
@@ -373,12 +399,11 @@ async function doUpdate() {
   });
 }
 
-// ---- Robust polling fallback – works even if observer misses an update ----
+// ---- Polling fallback ----
 function pollForOpponentMove() {
   if (isPlayingMove || requestInFlight) return;
   const fen = getFEN();
   if (fen !== lastFEN) {
-    // Opponent moved – process immediately
     console.log('ChessMonger: poll detected opponent move');
     doUpdate();
   }
@@ -388,12 +413,9 @@ function pollForOpponentMove() {
 userColor = null;
 gameEndDetected = false;
 
-scheduleUpdate(1500);             // initial delay to let the page settle
-setupBoardObserver();             // start watching the board
-startGameEndObserver();           // watch for game‑end
+scheduleUpdate(1500);
+setupBoardObserver();
+startGameEndObserver();
 
-// Regular polling every 3 seconds (ignores lastFEN check)
 setInterval(pollForOpponentMove, 3000);
-
-// Re‑check board element every 30 seconds (in case it was replaced)
 setInterval(setupBoardObserver, 30000);
