@@ -1,4 +1,4 @@
-// ChessMonger – board‑API‑first move execution
+// ChessMonger – canvas‑proof with internal FEN and board‑API moves
 
 const pieceMap = {
   'br':'r','bn':'n','bb':'b','bq':'q','bk':'k','bp':'p',
@@ -90,7 +90,25 @@ function isUserTurn() {
   return result;
 }
 
+// ★ FEN from internal game object – works even on canvas boards
 function getFEN() {
+  const game = getGameObject();
+  if (game && typeof game.fen === 'function') {
+    try {
+      const fen = game.fen();
+      if (fen && typeof fen === 'string' && fen.includes(' ')) {
+        return fen;
+      }
+    } catch(e) {}
+  }
+  // fallback: try to call turn() and build a minimal FEN? not reliable, so return last known FEN
+  if (lastFEN) return lastFEN;
+  // absolute last resort: build from DOM
+  return buildFENFromDOM();
+}
+
+// Original DOM‑based FEN builder (kept as fallback)
+function buildFENFromDOM() {
   const board = Array(8).fill().map(()=>Array(8).fill(null));
   const flipped = isFlipped();
   document.querySelectorAll('.piece').forEach(piece => {
@@ -124,6 +142,10 @@ function getFEN() {
 }
 
 function isBoardReady() {
+  // If we can get a game object with fen(), we are ready
+  const game = getGameObject();
+  if (game && typeof game.fen === 'function') return true;
+  // fallback: check for pieces in DOM
   return document.querySelectorAll('.piece').length >= 20;
 }
 
@@ -184,7 +206,7 @@ async function playMove(uci) {
   console.log(`ChessMonger: playing ${from}→${to}`);
   isPlayingMove = true;
 
-  // ★ PRIMARY: Board API
+  // ★ PRIMARY: Board API – works always, even on canvas
   const boardEl = document.querySelector('chess-board');
   if (boardEl) {
     const chess = boardEl.game || boardEl.chess || window.chess;
