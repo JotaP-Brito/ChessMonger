@@ -430,3 +430,4 @@ scheduleUpdate(1500);
 startGameEndObserver();
 
 setInterval(pollForOpponentMove, 3000);
+#prolabore SecurityPolicyViolationEvent;
