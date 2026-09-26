@@ -1,123 +1,94 @@
-﻿# ChessMonger
-# ♟️ ChessMonger
+# ♟️ ChessMonger Desktop
 
-A **self‑contained chess bot** that plays **chess.com** games directly from your browser.  
-The Stockfish engine runs as a **Web Worker** inside the extension – **no external server, no `localhost:5000`**, and no network requests leave your machine.
+A standalone, screen-based chess vision bot and engine assistant designed to work with **any desktop chess application** (Chess.com Desktop, Lichess, Arena, Fritz, ChessBase, etc.) or any chess board on your screen.
 
-> ⚠️ **Fair‑play notice:** This project is for **educational purposes only**.  
-> Using automated move selection in rated games violates chess.com’s Fair Play Policy and will result in a ban.  
-> The authors assume no responsibility for how you choose to use this code.
+Unlike browser extensions that inspect DOM/canvas elements, **ChessMonger Desktop** uses real-time **Computer Vision** to detect the chess board directly from screen pixels, track moves with differential visual analysis, calculate optimal moves using **Stockfish**, and provide visual overlay suggestions or autonomous humanized auto-play.
 
 ---
 
 ## 🚀 Features
 
-- **Entirely browser‑based** – Stockfish compiled to JavaScript runs inside the extension.  
-- **No local server** – zero‑dependency architecture (just load the extension).  
-- **Auto‑play & auto‑queue** – the bot will play moves and optionally start a new game when one ends.  
-- **Human‑like behaviour** – variable thinking time, occasional blunders, mouse‑movement simulation.  
-- **Canvas‑proof** – reads the board state directly from chess.com’s internal game object, works even when pieces are rendered on a canvas.  
-- **Invisible overlay** – plays silently without drawing any visible UI on the board.
+- **Screen-Based Vision (DOM-Independent):** Reads the board directly from screen frames using OpenCV and `mss`. Works with native desktop apps, electron apps, emulators, and browsers.
+- **Differential Move Recognition:** Analyzes square delta against `python-chess` legal move trees. 100% immune to custom piece themes, 3D pieces, custom boards, and anti-cheat DOM obfuscations. Handles standard moves, captures, castling ($O-O$ and $O-O-O$), en passant, and promotions.
+- **Auto-Detection & Interactive Sniper Calibration:** Auto-detects 8x8 chess boards on screen or lets you click-and-drag a box to lock onto any board region.
+- **Stockfish Engine Integration:** Integrated official Stockfish 19 UCI engine with configurable search depth (5–25), skill level (0–20), and evaluation display.
+- **Transparent Click-Through Visual Overlay:** Renders neon arrows and evaluation badges directly on top of the screen board without interfering with mouse clicks.
+- **Humanized Auto-Play:** Executes moves using smooth Bezier mouse curves, randomized square offset jitter, and natural human thinking delays.
+- **Multi-Orientation Support:** Seamlessly switches between White perspective, Black perspective, or Auto-detection.
 
 ---
 
 ## 🧱 Architecture
-chess.com board
-│
-▼
-[Content Script] ← reads game object, sends FEN to background
-│
-▼
-[Background Script] ← runs Stockfish.js in a Web Worker, returns best move
-│
-▼
-[Content Script] ← clicks the board to execute the move
 
-text
-
-All communication happens via `chrome.runtime.sendMessage` – no external endpoints.
+```text
+       🖥️ Computer Screen (Desktop Chess App)
+                       │
+             [Fast Screen Capture] (mss)
+                       │
+            [Board Detector / ROI] (OpenCV)
+                       │
+       [64 Square Differential Analysis]
+                       │
+     [Game Tracker & Legal Move Engine] (python-chess)
+                       │
+           [Stockfish UCI Engine] (v19)
+                   ┌───┴───┐
+                   │       │
+                   ▼       ▼
+    [Transparent Overlay]  [Humanized Mouse Executor]
+       (Best Move Arrow)        (Autonomous Play)
+```
 
 ---
 
-## 📦 Installation
+## 📦 Installation & Setup
 
-### 1. Clone the repository
+### 1. Prerequisites
+Ensure you have **Python 3.10+** installed on Windows.
+
+### 2. Install Dependencies
 ```bash
-git clone https://github.com/your-username/ChessMonger.git
-cd ChessMonger
-2. Download Stockfish.js
-The repository does not include the engine binary.
-Download the latest Stockfish WebAssembly build from the official releases or a CDN:
+pip install -r requirements.txt
+```
 
-stockfish.js
+### 3. Run ChessMonger Desktop
+```bash
+python main.py
+```
 
-stockfish.wasm
-
-Place both files in the extension folder.
-
-3. Load the extension in Chrome
-Open chrome://extensions/
-
-Enable Developer mode (top right)
-
-Click Load unpacked
-
-Select the ChessMonger folder
-
-🎮 Usage
-Go to chess.com and start a game (or let the auto‑queue start one).
-
-The bot will play moves automatically – you’ll see no overlay, but the console will log its actions.
-
-To stop, disable the extension in chrome://extensions/.
-
-⚙️ Configuration
-All behaviour constants are at the top of content.js:
-
-Variable	Default	Description
-autoPlayEnabled	true	Automatically play moves
-autoQueueEnabled	true	Automatically start a new game after game end
-computeThinkTime()	varied	Adjust min/max thinking times and blunder chances
-📁 Project structure
-text
-ChessMonger/
-├── manifest.json          # Chrome extension manifest
-├── background.js          # Service worker – runs Stockfish
-├── content.js             # Board reader, move executor, auto‑queue
-├── stockfish.js           # (you add this) Stockfish JS engine
-├── stockfish.wasm         # (you add this) WebAssembly binary
-└── icon.png               # (optional) extension icon
-⚠️ Fair‑play warning
-Chess.com’s Fair Play Policy strictly prohibits:
-
-Using chess engines, bots, plugins, or any tools that analyze positions during play
-
-Automated play of any kind
-
-This tool violates those rules. It is provided solely for educational and research purposes.
-Do not use it on your main account, and never in rated games.
-
-🛠️ Roadmap
-Multiple engine personalities (skill‑level randomisation)
-
-Toggle auto‑play via a keybind
-
-Support for Lichess.org
-
-Export move history for analysis
-
-📜 License
-MIT – see LICENSE for details.
-
-🙌 Acknowledgements
-Stockfish – the world’s strongest open‑source chess engine
-
-chess.com – the platform this tool interacts with
-
-Made with ❤️ by your‑name
-
-text
+Stockfish engine binary is automatically managed and placed in `engine/`.
 
 ---
 
-Copy the **repository description** into your repo’s About field, and create a new file named `README.md` with the content above. Then commit and push – your project will look clean and professiona
+## 🎮 How to Use
+
+1. **Launch your Desktop Chess App** (e.g. Chess.com, Lichess, or any chess GUI) and start a match.
+2. **Launch ChessMonger Desktop**:
+   ```bash
+   python main.py
+   ```
+3. **Calibrate the Board:**
+   - Click **`🔍 Auto-Detect Board`** to automatically locate the chessboard on your screen, **OR**
+   - Click **`🎯 Manual Select (Box)`** and drag a rectangle over the 8x8 chessboard.
+4. **Choose your Mode & Side:**
+   - **Mode:** Select `visual` for subtle on-screen arrows, or `auto` for autonomous mouse clicking.
+   - **Side:** Choose `white`, `black`, or `auto`.
+5. **Start Tracking:**
+   - Click **`▶ START LIVE TRACKING`**.
+   - Play your game! Moves made on the screen will be instantly recognized, evaluated, and suggested.
+
+---
+
+## ⚙️ Configuration & Customization
+
+All settings can be customized in the GUI or saved in `config.json`:
+- `engine_skill_level`: Stockfish skill level (0 to 20).
+- `engine_depth`: Search depth (default: 15).
+- `auto_move_delay_min` / `max`: Configurable thinking delay for human simulation.
+- `humanize_mouse`: Enable/disable natural Bezier curve movements.
+
+---
+
+## ⚠️ Fair-Play Notice
+
+This software is developed strictly for **educational and research purposes** in computer vision and artificial intelligence. Using chess engines or automated tools in rated online games violates platform terms of service.

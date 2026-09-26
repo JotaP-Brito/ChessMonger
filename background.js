@@ -86,19 +86,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
-function getFallbackMove(fen) {
-  // Extract active colour and suggest a simple pawn move
-  const active = fen.split(' ')[1];
-  if (active === 'w') return 'e2e4';
-  else return 'e7e5';
-}
-
 async function sendBestMove(fen, time, sendResponse) {
   if (fallbackMode) {
-    console.log('ChessMonger: using fallback move');
-    const move = getFallbackMove(fen);
-    console.log('ChessMonger: fallback move =', move);
-    sendResponse({ moves: [{ uci: move, san: '', score: '' }] });
+    console.warn('ChessMonger: engine unavailable; no move returned');
+    sendResponse({ moves: [] });
     return;
   }
 
@@ -116,8 +107,7 @@ async function sendBestMove(fen, time, sendResponse) {
   }
   console.warn('ChessMonger: no bestmove received in time');
   // Fallback move
-  const move = getFallbackMove(fen);
-  sendResponse({ moves: [{ uci: move, san: '', score: '' }] });
+  sendResponse({ moves: [] });
 }
 
 startEngine();

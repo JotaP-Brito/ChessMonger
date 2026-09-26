@@ -145,7 +145,7 @@ function applyMove(uci) {
   const to = uci.substring(2,4);
   const promotion = uci.length > 4 ? uci[4] : null;
 
-  let { placement, active, castling, enPassant } = boardState;
+  let { placement, active, castling, enPassant, halfMove, fullMove } = boardState;
   const rows = placement.split('/');
   const board = rows.map(row => {
     const arr = [];
@@ -182,6 +182,12 @@ function applyMove(uci) {
   if (piece === 'r' && from === 'a8') castling = castling.replace('q','');
   if (piece === 'r' && from === 'h8') castling = castling.replace('k','');
 
+  // A rook capture also removes the corresponding castling right.
+  if (captured === 'R' && to === 'a1') castling = castling.replace('Q','');
+  if (captured === 'R' && to === 'h1') castling = castling.replace('K','');
+  if (captured === 'r' && to === 'a8') castling = castling.replace('q','');
+  if (captured === 'r' && to === 'h8') castling = castling.replace('k','');
+
   if (piece === 'P' && fromCol !== toCol && !captured) board[fromRow][toCol] = null;
   if (piece === 'p' && fromCol !== toCol && !captured) board[fromRow][toCol] = null;
 
@@ -208,7 +214,8 @@ function applyMove(uci) {
   boardState.active = active === 'w' ? 'b' : 'w';
   boardState.castling = castling || '-';
   boardState.enPassant = newEnPassant;
-  if (active === 'b') boardState.fullMove++;
+  boardState.halfMove = (piece === 'P' || piece === 'p' || captured !== null) ? 0 : halfMove + 1;
+  boardState.fullMove = active === 'b' ? fullMove + 1 : fullMove;
 }
 
 // ---- Sync from move list ----
@@ -229,13 +236,13 @@ function syncFromMoveList() {
     const uci = parseSAN(san, fen);
     if (uci) {
       applyMove(uci);
-      fen = boardState.placement + ' ' + boardState.active + ' ' + boardState.castling + ' ' + boardState.enPassant + ' 0 ' + boardState.fullMove;
+      fen = boardState.placement + ' ' + boardState.active + ' ' + boardState.castling + ' ' + boardState.enPassant + ' ' + boardState.halfMove + ' ' + boardState.fullMove;
     }
   }
 }
 
 function getCurrentFEN() {
-  return boardState.placement + ' ' + boardState.active + ' ' + boardState.castling + ' ' + boardState.enPassant + ' 0 ' + boardState.fullMove;
+  return boardState.placement + ' ' + boardState.active + ' ' + boardState.castling + ' ' + boardState.enPassant + ' ' + boardState.halfMove + ' ' + boardState.fullMove;
 }
 
 // ---- Move execution ----
@@ -262,14 +269,15 @@ async function playMove(uci) {
   console.log(`ChessMonger: playing ${uci}`);
   isPlayingMove = true;
 
-  // Update internal state immediately
-  applyMove(uci);
-
   // Try API first
   const api = findChessAPI();
+  let movedViaApi = false;
   if (api?.move) {
     try {
-      api.move({from: uci.substring(0,2), to: uci.substring(2,4), promotion:'q'});
+      const apiMove = {from: uci.substring(0,2), to: uci.substring(2,4)};
+      if (uci.length > 4) apiMove.promotion = uci[4];
+      api.move(apiMove);
+      movedViaApi = true;
       console.log('move via API');
     } catch(e) { /* fall through */ }
   }
@@ -277,7 +285,7 @@ async function playMove(uci) {
   // Click fallback
   const fp = getSquareCenter(uci.substring(0,2));
   const tp = getSquareCenter(uci.substring(2,4));
-  if (fp && tp) {
+  if (!movedViaApi && fp && tp) {
     const fromEl = document.elementFromPoint(fp.x, fp.y) || document.body;
     fromEl.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:fp.x, clientY:fp.y, button:0}));
     await new Promise(r=>setTimeout(r,40));
@@ -285,6 +293,8 @@ async function playMove(uci) {
     toEl.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, clientX:tp.x, clientY:tp.y, button:0}));
     console.log('move via click');
   }
+
+  if (movedViaApi || (fp && tp)) applyMove(uci);
 
   await new Promise(r=>setTimeout(r,400));
 
@@ -430,4 +440,3 @@ scheduleUpdate(1500);
 startGameEndObserver();
 
 setInterval(pollForOpponentMove, 3000);
-#prolabore SecurityPolicyViolationEvent;
